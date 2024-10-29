@@ -155,7 +155,7 @@ class ARCamera:
             "distortion": np.array([rgb_pdcm1080.distor[0], rgb_pdcm1080.distor[1], rgb_pdcm1080.distor[2], rgb_pdcm1080.distor[3], rgb_pdcm1080.distor[4]])
         }
         camera_pose_in_imu = {
-            "R": np.array(rgb_transform[0].rotation).reshape(3,3),
+            "R": np.array(rgb_transform[0].rotation).reshape(3,3).T, # 此处不确定是否要做T
             "T": np.array(rgb_transform[0].translation)
         }
         return camera_intrinsic, camera_pose_in_imu
@@ -222,8 +222,8 @@ class ARCamera:
         # 我们需要rgb到slam坐标系的变换，因此（矩阵相乘的顺序：先rgb_transform,再imu_transform，左乘）：
         rgbcam_pose_R = np.dot(imu_pose_R, self.camera_pose_in_imu["R"])
         rgbcam_pose_t = np.dot(imu_pose_R, self.camera_pose_in_imu["T"]) + imu_pose_t
-        # rgbcam_pose_R = imu_pose_R
-        # rgbcam_pose_t = imu_pose_t
+        # rgbcam_pose_R = np.dot(self.camera_pose_in_imu["R"], imu_pose_R)
+        # rgbcam_pose_t = np.dot(self.camera_pose_in_imu["R"], imu_pose_t) + self.camera_pose_in_imu["T"]
 
         # 因为opengl的相机和opengl坐标系的定义不一样。y和z轴相反。需要先乘一个从opencv到opengl的变换矩阵。
         correction_matrix = np.diag([1, -1, -1])
@@ -302,7 +302,7 @@ class ARCamera:
             self.set_projection_by_cam_intrinsic1(self.camera_intrinsic)
 
             initial_mesh_pose = np.eye(4)
-            # initial_mesh_pose[:3,:3] = np.array([0,1,0,0,0,-1,-1,0,0]).reshape(3,3).T
+            initial_mesh_pose[:3,:3] = np.array([-1,0,0,0,0,1,0,-1,0]).reshape(3,3).T
             initial_mesh_pose[:3, 3] = np.array([0,0,0])  # 将mesh放置在相机前方0.5米处，在slam坐标系下
             
             # 获取slam坐标系下相机的位姿
