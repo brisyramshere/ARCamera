@@ -15,12 +15,12 @@ from plyfile import PlyData
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class ColorCameraResolution():
-        RGB_1920x1080=0
-        RGB_1280x720=1
-        RGB_640x480=2
-        RGB_320x240=3
-        RGB_2560x1920=4
-        RGB_3840x2160=5
+    RGB_1920x1080=0
+    RGB_1280x720=1
+    RGB_640x480=2
+    RGB_320x240=3   
+    RGB_2560x1920=4
+    RGB_3840x2160=5
 fe_auto_Exposure=c_bool()
 fe_gain=c_int()
 fe_exposureTimeMs=c_int()
@@ -30,7 +30,7 @@ class ARCamera:
     def __init__(self):
         self.init_xvsdk()
         self.vertices, self.faces, self.normals = self.load_ply('initial_mesh.ply')
-        self.camera_intrinsic, self.camera_extrinsic = self.get_rgb_camera_intrinsics()
+        self.camera_intrinsic, self.camera_pose_in_imu = self.get_rgb_camera_intrinsics()
         self.display = self.init_pygame_opengl()
         self.init_vbo()
         self.shader_program = self.create_shader_program()
@@ -70,7 +70,7 @@ class ARCamera:
             normal = np.cross(v2 - v1, v3 - v1)
             normals[face] += normal
         normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
-        vertices = vertices
+        vertices = vertices*1
         # 模型移动到0，0，0
         vertices = vertices - np.mean(vertices, axis=0)
         return vertices, faces, normals
@@ -154,11 +154,11 @@ class ARCamera:
             "height": rgb_pdcm1080.h,
             "distortion": np.array([rgb_pdcm1080.distor[0], rgb_pdcm1080.distor[1], rgb_pdcm1080.distor[2], rgb_pdcm1080.distor[3], rgb_pdcm1080.distor[4]])
         }
-        camera_extrinsic = {
+        camera_pose_in_imu = {
             "R": np.array(rgb_transform[0].rotation).reshape(3,3),
             "T": np.array(rgb_transform[0].translation)
         }
-        return camera_intrinsic, camera_extrinsic
+        return camera_intrinsic, camera_pose_in_imu
 
     def get_rgb_image(self):
         """获取RGB图像"""
@@ -195,87 +195,41 @@ class ARCamera:
         glDisable(GL_TEXTURE_2D)
         glEnable(GL_DEPTH_TEST)
 
-    def get_c2w_matrix(self):
+    def get_cam_pose(self):
         """获取SLAM 6DOF位姿并构建模型矩阵"""
         position, orientation, quaternion, slam_edgeTimestamp, slam_hostTimestamp, slam_confidence = xvsdk.xv_get_6dof_at_timestamp(c_double(self.rgb_hostTimestamp.value))
         print("6dof: x = {:.3f}, y = {:.3f}, z = {:.3f}, pitch = {:.3f}, yaw = {:.3f}, roll = {:.3f}".format(
             position.x, position.y, position.z, 
             orientation.x * 180 / 3.14, orientation.y * 180 / 3.14, orientation.z * 180 / 3.14))
         # print( "quaternion[0] = ", quaternion.q0, ", quaternion[1] = ", quaternion.q1, ", quaternion[2] = ", quaternion.q2, ", quaternion[3] = ", quaternion.q3, ", edgeTimestamp = ", slam_edgeTimestamp.value, ", hostTimestamp = ", slam_hostTimestamp.value, ", confidence = ", slam_confidence.value, "\n")
-        # R T对应的是slam相机坐标系下的点转换到slam坐标系的变换，即c2w
-        # q0 = quaternion.q0
-        # q1 = quaternion.q1
-        # q2 = quaternion.q2
-        # q3 = quaternion.q3
+        # 四元数转成旋转矩阵
+        # 注意Xv的四元数的存储顺序。q3是w
+        # 实测欧拉角转旋转矩阵会有问题；使用欧拉角转出来的旋转矩阵，再某些角度下存在问题，模型锚定不稳。改用四元数没有问题
+        x = quaternion.q0
+        y = quaternion.q1
+        z = quaternion.q2
+        w = quaternion.q3
 
-        # R1 = np.array([
-        #     [1 - 2*(q2**2 + q3**2), 2*(q1*q2 - q0*q3), 2*(q1*q3 + q0*q2)],
-        #     [2*(q1*q2 + q0*q3), 1 - 2*(q1**2 + q3**2), 2*(q2*q3 - q0*q1)],
-        #     [2*(q1*q3 - q0*q2), 2*(q2*q3 + q0*q1), 1 - 2*(q1**2 + q2**2)]
-        # ])
-
-        # 欧拉角转四元数
-        # 欧拉角转四元数
-        # 先将欧拉角转换为弧度
-        # pitch = orientation.x  # 绕x轴
-        # yaw = orientation.y   # 绕y轴
-        # roll = orientation.z  # 绕z轴
-        
-        # # 计算每个角的一半的正弦和余弦值
-        # cp = np.cos(pitch * 0.5)
-        # sp = np.sin(pitch * 0.5)
-        # cy = np.cos(yaw * 0.5) 
-        # sy = np.sin(yaw * 0.5)
-        # cr = np.cos(roll * 0.5)
-        # sr = np.sin(roll * 0.5)
-
-        # # 计算四元数的四个分量
-        # q0 = cr * cy * cp + sr * sy * sp  # w
-        # q1 = sr * cy * cp - cr * sy * sp  # x
-        # q2 = cr * sy * cp + sr * cy * sp  # y
-        # q3 = cr * cy * sp - sr * sy * cp  # z
-        # 通过欧拉角计算旋转矩阵
-        # 绕x轴旋转矩阵
-        Rx = np.array([
-            [1, 0, 0],
-            [0, np.cos(orientation.x), -np.sin(orientation.x)],
-            [0, np.sin(orientation.x), np.cos(orientation.x)]
+        imu_pose_R = np.array([
+            [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+            [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+            [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
         ])
-        
-        # 绕y轴旋转矩阵
-        Ry = np.array([
-            [np.cos(orientation.y), 0, np.sin(orientation.y)],
-            [0, 1, 0],
-            [-np.sin(orientation.y), 0, np.cos(orientation.y)]
-        ])
-        
-        # 绕z轴旋转矩阵
-        Rz = np.array([
-            [np.cos(orientation.z), -np.sin(orientation.z), 0],
-            [np.sin(orientation.z), np.cos(orientation.z), 0],
-            [0, 0, 1]
-        ])
-        
-        # 合成旋转矩阵 R = Rz * Ry * Rx
-        R = np.dot(Rz, np.dot(Ry, Rx))
-        T = np.array([-position.x, -position.y, -position.z])
+        imu_pose_t = np.array([-position.x, -position.y, -position.z]) # Xv的python接口输出的imu position加了负号；C++ sdk没这问题
 
         # slam输出的R,T是imu的位姿，即imu到slam坐标系的变换
         # camera_extrinsic是rgb坐标系到imu坐标系的变换
         # 我们需要rgb到slam坐标系的变换，因此（矩阵相乘的顺序：先rgb_transform,再imu_transform，左乘）：
-        R = np.dot(R, self.camera_extrinsic["R"])
-        T = np.dot(R, self.camera_extrinsic["T"]) + T
-        
-        # 因为slam坐标系和opengl坐标系的定义不一样。y和z轴相反，所以需要进行矫正.要转换到opengl坐标系，还需要做矫正
+        rgbcam_pose_R = np.dot(imu_pose_R, self.camera_pose_in_imu["R"])
+        rgbcam_pose_t = np.dot(imu_pose_R, self.camera_pose_in_imu["T"]) + imu_pose_t
+        # rgbcam_pose_R = imu_pose_R
+        # rgbcam_pose_t = imu_pose_t
+
+        # 因为opengl的相机和opengl坐标系的定义不一样。y和z轴相反。需要先乘一个从opencv到opengl的变换矩阵。
         correction_matrix = np.diag([1, -1, -1])
-        R = np.dot(R,correction_matrix)
-        # T = np.dot(correction_matrix, T)
-        
-        # 记录下第一帧slam的结果
-        if(np.sum(np.abs(T)) != 0) and self.first_slam_R is not None:
-            self.first_slam_R = R
-            self.first_slam_T = T
-        return R,T
+        rgbcam_pose_R = np.dot(rgbcam_pose_R,correction_matrix) # 左乘形式下，correction_matrix放在右边表示先乘
+        # T = np.dot(correction_matrix, T) # 注意  我只需要将相机坐标轴调个头，相机原点没变
+        return rgbcam_pose_R, rgbcam_pose_t
 
     def set_projection_by_cam_intrinsic1(self, camera_intrinsic):
         glMatrixMode(GL_PROJECTION)
@@ -348,16 +302,17 @@ class ARCamera:
             self.set_projection_by_cam_intrinsic1(self.camera_intrinsic)
 
             initial_mesh_pose = np.eye(4)
+            # initial_mesh_pose[:3,:3] = np.array([0,1,0,0,0,-1,-1,0,0]).reshape(3,3).T
             initial_mesh_pose[:3, 3] = np.array([0,0,0])  # 将mesh放置在相机前方0.5米处，在slam坐标系下
             
-            # 获取SLAM位姿矩阵,表示相机的运动，相机在slam坐标系下的三轴向量、位置
-            slam_R,slam_T = self.get_c2w_matrix() 
+            # 获取slam坐标系下相机的位姿
+            campose_R,campose_t = self.get_cam_pose() 
             
             # 设置模型视图矩阵为SLAM位姿矩阵的逆
             glMatrixMode(GL_MODELVIEW)
             slam_matrix_inv = np.eye(4)
-            slam_matrix_inv[:3, :3] = slam_R.T
-            slam_matrix_inv[:3, 3] = -np.dot(slam_R.T, slam_T)
+            slam_matrix_inv[:3, :3] = campose_R.T
+            slam_matrix_inv[:3, 3] = -np.dot(campose_R.T, campose_t)
             glLoadMatrixf(slam_matrix_inv.T)
             
             # 设置mesh的初始位置
