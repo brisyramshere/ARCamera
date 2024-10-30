@@ -12,7 +12,7 @@ import os
 from plyfile import PlyData
 
 # 设置使用独立显卡
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class ColorCameraResolution():
     RGB_1920x1080=0
@@ -246,6 +246,7 @@ class ARCamera:
         return rgbcam_pose_R, rgbcam_pose_t
 
     def set_projection_by_cam_intrinsic1(self, camera_intrinsic):
+        """根据相机内参生成投影矩阵，实现1"""
         # 假设cx cy在图像的中心，是一种近似的实现，不精准
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -255,7 +256,25 @@ class ARCamera:
         aspect = (camera_intrinsic["width"] * fy) / (camera_intrinsic["height"] * fx)
         gluPerspective(fovy, aspect, 0.1, 100.0)
 
+    def set_projection_by_cam_intrinsic2(self, camera_intrinsic):
+        """根据相机内参生成投影矩阵，实现2"""
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        fx, fy = camera_intrinsic["fx"], camera_intrinsic["fy"]
+        cx, cy = camera_intrinsic["u0"], camera_intrinsic["v0"]
+        near, far = 0.1, 100.0
+        width, height = self.display
+        # 设置平头视锥体，代表投影矩阵
+        glFrustum(
+            -cx * near / fx,            # 左
+            (width - cx) * near / fx,   # 右
+            -(height - cy) * near / fy, # 下
+            cy * near / fy,             # 上
+            near,                       # 近
+            far)                        # 远
+
     def set_projection_by_cam_intrinsic3(self, camera_intrinsic):
+        """根据相机内参生成投影矩阵，实现3"""
         fx = camera_intrinsic["fx"]
         fy = camera_intrinsic["fy"]
         cx = camera_intrinsic["u0"]
@@ -277,33 +296,6 @@ class ARCamera:
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         glMultMatrixf(projectionMatrix.T)
-
-    def set_projection_by_cam_intrinsic2(self, camera_intrinsic):
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        fx, fy = camera_intrinsic["fx"], camera_intrinsic["fy"]
-        cx, cy = camera_intrinsic["u0"], camera_intrinsic["v0"]
-        near, far = 0.1, 100.0
-        width, height = self.display
-        
-        # 设置平头视锥体，代表投影矩阵
-        glFrustum(
-            -cx * near / fx,            # 左
-            (width - cx) * near / fx,   # 右
-            -(height - cy) * near / fy, # 下
-            cy * near / fy,             # 上
-            near,                       # 近
-            far)                        # 远
-
-    def set_modelview_by_RT(self, R, t):
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        rot_mat = np.eye(4)
-        rot_mat[:3, :3] = R
-        trans_mat = np.eye(4)
-        trans_mat[:3, 3] = t
-        glMultMatrixf(rot_mat.T)
-        glMultMatrixf(trans_mat.T)
 
     def run(self):
         """主循环"""
