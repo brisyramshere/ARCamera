@@ -27,7 +27,8 @@ fe_exposureTimeMs=c_int()
 fe_auto_Exposure.value=True
 
 class ARCamera:
-    def __init__(self):
+    def __init__(self, isUndistort=True):
+        self.isUndistort = isUndistort
         self.init_xvsdk()
         self.vertices, self.faces, self.normals = self.load_ply('initial_mesh.ply')
         self.camera_intrinsic, self.camera_pose_in_imu = self.get_rgb_camera_intrinsics()
@@ -155,7 +156,7 @@ class ARCamera:
             "distortion": np.array([rgb_pdcm1080.distor[0], rgb_pdcm1080.distor[1], rgb_pdcm1080.distor[2], rgb_pdcm1080.distor[3], rgb_pdcm1080.distor[4]])
         }
         camera_pose_in_imu = {
-            "R": np.array(rgb_transform[0].rotation).reshape(3,3).T, # 此处不确定是否要做T
+            "R": np.array(rgb_transform[0].rotation).reshape(3,3),  # row major 3x3 matrix
             "T": np.array(rgb_transform[0].translation)
         }
         return camera_intrinsic, camera_pose_in_imu
@@ -170,6 +171,17 @@ class ARCamera:
             color_image = color_image[:rgb_width.value*nheight]
             color_image = color_image.reshape(nheight, rgb_width.value)
             color_image = cv2.cvtColor(color_image, cv2.COLOR_YUV2RGB_IYUV) 
+            # 构建相机内参矩阵
+            camera_matrix = np.array([
+                [self.camera_intrinsic["fx"], 0, self.camera_intrinsic["u0"]],
+                [0, self.camera_intrinsic["fy"], self.camera_intrinsic["v0"]],
+                [0, 0, 1]
+            ])
+            
+            # 使用cv2.undistort进行畸变矫正
+            if self.isUndistort:
+                color_image = cv2.undistort(color_image, camera_matrix, 
+                                          self.camera_intrinsic["distortion"])
             color_image = cv2.flip(color_image, 0)
             # cv2.imwrite("color_image.jpg", color_image)
             return color_image
@@ -198,6 +210,8 @@ class ARCamera:
     def get_cam_pose(self):
         """获取SLAM 6DOF位姿并构建模型矩阵"""
         position, orientation, quaternion, slam_edgeTimestamp, slam_hostTimestamp, slam_confidence = xvsdk.xv_get_6dof_at_timestamp(c_double(self.rgb_hostTimestamp.value))
+        # position, orientation, quaternion, slam_edgeTimestamp, slam_hostTimestamp, slam_confidence = xvsdk.xv_get_6dof_prediction(c_double(0.005))
+        
         print("6dof: x = {:.3f}, y = {:.3f}, z = {:.3f}, pitch = {:.3f}, yaw = {:.3f}, roll = {:.3f}".format(
             position.x, position.y, position.z, 
             orientation.x * 180 / 3.14, orientation.y * 180 / 3.14, orientation.z * 180 / 3.14))
@@ -232,6 +246,7 @@ class ARCamera:
         return rgbcam_pose_R, rgbcam_pose_t
 
     def set_projection_by_cam_intrinsic1(self, camera_intrinsic):
+        # 假设cx cy在图像的中心，是一种近似的实现，不精准
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         fx = camera_intrinsic["fx"]
@@ -240,11 +255,34 @@ class ARCamera:
         aspect = (camera_intrinsic["width"] * fy) / (camera_intrinsic["height"] * fx)
         gluPerspective(fovy, aspect, 0.1, 100.0)
 
-    def set_projection_by_cam_intrinsic2(self, K):
+    def set_projection_by_cam_intrinsic3(self, camera_intrinsic):
+        fx = camera_intrinsic["fx"]
+        fy = camera_intrinsic["fy"]
+        cx = camera_intrinsic["u0"]
+        cy = camera_intrinsic["v0"]
+        width = camera_intrinsic["width"]   
+        height = camera_intrinsic["height"]
+        near = 0.1
+        far = 100.0
+        # 公式参考（公式形式和相机坐标系的定义有关系，此处遵循opengl默认的坐标系做的定义）：
+        #  https://stackoverflow.com/questions/22064084/how-to-create-perspective-projection-matrix-given-focal-points-and-camera-princ
+        projectionMatrix=np.zeros((4,4))
+        projectionMatrix[0,0] = 2*fx/width
+        projectionMatrix[1,1] = 2*fy/height
+        projectionMatrix[0,2] = (2*cx/width-1.0) 
+        projectionMatrix[1,2] = (2*cy/height-1.0) 
+        projectionMatrix[2,2] = -(far+near)/(far-near)
+        projectionMatrix[3,2] = -1
+        projectionMatrix[2,3] = -(2*near*far)/(far-near)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
+        glMultMatrixf(projectionMatrix.T)
+
+    def set_projection_by_cam_intrinsic2(self, camera_intrinsic):
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        fx, fy = camera_intrinsic["fx"], camera_intrinsic["fy"]
+        cx, cy = camera_intrinsic["u0"], camera_intrinsic["v0"]
         near, far = 0.1, 100.0
         width, height = self.display
         
@@ -299,27 +337,23 @@ class ARCamera:
             # 将slam的坐标系作为为opengl中的世界坐标系
             # 相机启动时，slam坐标系原点就在相机所在位置，坐标系的方向和opencv一致
             # 3D模型初始位置就在slam坐标系原点，和相机重合，需要把3D模型调整到(0,0,0.5)的位置，这样和相机可以被正面拍到
-            self.set_projection_by_cam_intrinsic1(self.camera_intrinsic)
-
-            initial_mesh_pose = np.eye(4)
-            initial_mesh_pose[:3,:3] = np.array([-1,0,0,0,0,1,0,-1,0]).reshape(3,3).T
-            initial_mesh_pose[:3, 3] = np.array([0,0,0])  # 将mesh放置在相机前方0.5米处，在slam坐标系下
+            self.set_projection_by_cam_intrinsic3(self.camera_intrinsic)
             
             # 获取slam坐标系下相机的位姿
             campose_R,campose_t = self.get_cam_pose() 
             
-            # 设置模型视图矩阵为SLAM位姿矩阵的逆
+            # 设置模型视图矩阵为rgb相机在Slam坐标系下pose矩阵的逆矩阵
             glMatrixMode(GL_MODELVIEW)
             slam_matrix_inv = np.eye(4)
             slam_matrix_inv[:3, :3] = campose_R.T
             slam_matrix_inv[:3, 3] = -np.dot(campose_R.T, campose_t)
             glLoadMatrixf(slam_matrix_inv.T)
             
-            # 设置mesh的初始位置
-            # glMultMatrixf(initial_mesh_pose.T)
-            # 绘制mesh
+            # 设置mesh的初始位置，把mesh摆正
+            initial_mesh_pose = np.eye(4)
+            initial_mesh_pose[:3,:3] = np.array([-1,0,0,0,0,1,0,-1,0]).reshape(3,3).T
+            initial_mesh_pose[:3, 3] = np.array([0,0,0])  # 将mesh放置在相机前方0.5米处，在slam坐标系下
             self.draw_mesh(initial_mesh_pose) # 接收行主序的矩阵格式（numpy）
-            
             pygame.display.flip()
 
         # 清理资源
@@ -333,5 +367,5 @@ class ARCamera:
         xvsdk.stop()
 
 if __name__ == "__main__":
-    ar_camera = ARCamera()
+    ar_camera = ARCamera(isUndistort=False)
     ar_camera.run()
